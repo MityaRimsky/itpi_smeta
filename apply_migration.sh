@@ -57,6 +57,7 @@ PGPASSWORD="$DB_PASSWORD" psql \
     -p "$DB_PORT" \
     -U "$DB_USER" \
     -d "$DB_NAME" \
+    --pset pager=off \
     -f "$MIGRATION_FILE"
 
 if [ $? -eq 0 ]; then
