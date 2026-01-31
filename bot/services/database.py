@@ -98,51 +98,75 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"Ошибка поиска работ: {e}")
             # Fallback на простой поиск если RPC не работает
+            return await self._fallback_search(query, scale, category, territory, limit)
+    
+    async def _fallback_search(
+        self,
+        query: str,
+        scale: Optional[str] = None,
+        category: Optional[str] = None,
+        territory: Optional[str] = None,
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Fallback поиск с альтернативными вариантами запроса"""
+        # Список вариантов поиска
+        search_variants = [query]
+        
+        # Добавляем альтернативные варианты для топографии
+        query_lower = query.lower()
+        if any(kw in query_lower for kw in ['топо', 'план', 'съемка', 'инженерно']):
+            search_variants.extend([
+                'топографическ',
+                'инженерно-топографическ',
+                'план',
+                '1:500'
+            ])
+        
+        results = []
+        seen_ids = set()
+        
+        for search_term in search_variants:
             try:
                 query_builder = self.client.table("norm_items").select(
                     "id, work_title, unit, price_field, price_office, table_no, section, params"
                 )
                 
                 # Поиск по названию работы
-                query_builder = query_builder.ilike("work_title", f"%{query}%")
-                
-                # Применяем фильтры если указаны
-                if scale:
-                    query_builder = query_builder.eq("params->>scale", scale)
-                
-                if category:
-                    query_builder = query_builder.eq("params->>category", category)
-                
-                if territory:
-                    query_builder = query_builder.eq("params->>territory", territory)
+                query_builder = query_builder.ilike("work_title", f"%{search_term}%")
                 
                 # Выполняем запрос
                 response = query_builder.limit(limit).execute()
                 
                 # Преобразуем результаты
-                results = []
                 for item in response.data:
+                    if item['id'] in seen_ids:
+                        continue
+                    seen_ids.add(item['id'])
+                    
                     results.append({
                         'id': item['id'],
                         'name': item['work_title'],
                         'work_title': item['work_title'],
-                        'code': item['section'],
-                        'unit': item['unit'],
+                        'code': item.get('section', ''),
+                        'unit': item.get('unit', ''),
                         'price': item.get('price_field', 0),
                         'price_field': item.get('price_field', 0),
                         'price_office': item.get('price_office', 0),
                         'table_no': item.get('table_no'),
-                        'table_ref': f"т. {item.get('table_no')}, {item.get('section')}",
-                        'section': item.get('section'),
+                        'table_ref': f"т. {item.get('table_no')}, {item.get('section', '')}",
+                        'section': item.get('section', ''),
                         'params': item.get('params', {})
                     })
                 
-                logger.info(f"Найдено работ (fallback): {len(results)} по запросу '{query}'")
-                return results
-                
+                if len(results) >= limit:
+                    break
+                    
             except Exception as e2:
-                logger.error(f"Ошибка fallback поиска: {e2}")
-                return []
+                logger.error(f"Ошибка fallback поиска для '{search_term}': {e2}")
+                continue
+        
+        logger.info(f"Найдено работ (fallback): {len(results)} по запросу '{query}'")
+        return results[:limit]
     
     async def get_work_by_id(self, work_id: str) -> Optional[Dict]:
         """
