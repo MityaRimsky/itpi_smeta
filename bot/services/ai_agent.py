@@ -115,7 +115,7 @@ class AIAgent:
                     ]
                 })
             
-            # Съемка подземных коммуникаций - коэффициент К2
+            # Съемка подземных коммуникаций - коэффициент К1
             if params.get('has_underground_comms') is None:
                 missing.append({
                     'param': 'has_underground_comms',
@@ -123,6 +123,17 @@ class AIAgent:
                     'options': [
                         ('1', 'Да, со съемкой подземных коммуникаций', True),
                         ('2', 'Нет, без подземных коммуникаций', False)
+                    ]
+                })
+            
+            # Эскизы опор ЛЭП/связи - коэффициент К2
+            if params.get('has_pole_sketches') is None:
+                missing.append({
+                    'param': 'has_pole_sketches',
+                    'question': 'Нужны эскизы опор ЛЭП/связи?',
+                    'options': [
+                        ('1', 'Да, с эскизами опор', True),
+                        ('2', 'Нет, без эскизов', False)
                     ]
                 })
             
@@ -239,18 +250,36 @@ class AIAgent:
         if len(found_works) == 1:
             return found_works[0]
         
-        # Формируем список для AI
-        works_list = "\n".join([
-            f"{i+1}. {w['work_title']} ({w['unit']}, полевые: {w.get('price_field', 0)}, камеральные: {w.get('price_office', 0)} руб)"
-            for i, w in enumerate(found_works)
-        ])
+        # Формируем список для AI с параметрами
+        works_list = []
+        for i, w in enumerate(found_works):
+            params = w.get('params', {})
+            params_str = ""
+            if params.get('road_category'):
+                params_str += f", категория дороги: {params['road_category']}"
+            if params.get('category'):
+                params_str += f", кат.сложности: {params['category']}"
+            if params.get('voltage'):
+                params_str += f", напряжение: {params['voltage']} кВ"
+            
+            works_list.append(
+                f"{i+1}. {w['work_title']} (§{w.get('section', '?')}{params_str}, полевые: {w.get('price_field', 0)}, камеральные: {w.get('price_office', 0)} руб)"
+            )
+        
+        works_str = "\n".join(works_list)
         
         prompt = f"""Выбери наиболее подходящую работу для запроса пользователя.
 
 Запрос: "{user_request}"
 
 Доступные работы:
-{works_list}
+{works_str}
+
+ВАЖНО:
+- "III-IV категории" дороги = road_category "III-IV" (§2)
+- "I-II категории" дороги = road_category "I-II" (§1)
+- "V категории" дороги = road_category "V" (§3)
+- Категория сложности (I, II, III) - это отдельный параметр!
 
 Верни JSON с полем "index" (номер выбранной работы, начиная с 1)."""
 

@@ -247,6 +247,12 @@ class SmetaBot:
             elif any(kw in msg_lower for kw in ['2', 'нет', 'без']):
                 value = False
         
+        elif param_name == 'has_pole_sketches':
+            if any(kw in msg_lower for kw in ['1', 'да', 'нужн', 'с эскиз']):
+                value = True
+            elif any(kw in msg_lower for kw in ['2', 'нет', 'без']):
+                value = False
+        
         elif param_name == 'work_stage':
             if any(kw in msg_lower for kw in ['1', 'обе', 'полн', 'все']):
                 value = 'обе'

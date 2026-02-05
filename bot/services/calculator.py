@@ -1,7 +1,12 @@
 """
-Калькулятор стоимости работ
-Рассчитывает стоимость с учетом коэффициентов и надбавок
+Калькулятор стоимости работ по СБЦ ИГДИ-2004
+Рассчитывает стоимость с учетом коэффициентов K1, K2, K3 и надбавок
 Поддерживает раздельный расчет полевых и камеральных работ
+
+Структура коэффициентов по СБЦ ИГДИ-2004:
+- K1: Коэффициенты из примечаний к таблицам (условия/опции внутри конкретного вида работ)
+- K2: Коэффициенты из п.15 ОУ (способ/формат выполнения/выдачи)
+- K3: Коэффициенты условий производства из п.8 и п.14 ОУ (район, режим, период и т.д.)
 """
 
 from typing import Dict, List, Optional, Tuple
@@ -10,7 +15,14 @@ from loguru import logger
 
 
 class CostCalculator:
-    """Калькулятор стоимости работ"""
+    """
+    Калькулятор стоимости работ по СБЦ ИГДИ-2004
+    
+    Порядок применения коэффициентов:
+    1. K1 (примечания к таблицам) - к базовой цене строки
+    2. K2 (п.15 ОУ) - к стоимости работ
+    3. K3 (п.8, п.14 ОУ) - к итогу (пока = 1.0, данные объекта не заданы)
+    """
     
     def __init__(self, db_service):
         """
@@ -41,6 +53,10 @@ class CostCalculator:
             Детальный расчет стоимости
         """
         try:
+            # Обработка None для work_stage
+            if work_stage is None:
+                work_stage = 'обе'
+            
             logger.info(f"calculate_full: work={work}, quantity={quantity}, work_stage={work_stage}")
             logger.info(f"calculate_full: price_field={work.get('price_field')}, price_office={work.get('price_office')}")
             
@@ -166,66 +182,227 @@ class CostCalculator:
             'total': float(total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
         }
     
+    async def _get_coefficients_from_db(self, params: Dict, table_no: int, stage: str) -> Dict:
+        """
+        Получает коэффициенты K1, K2, K3 из базы данных
+        
+        Args:
+            params: Параметры работ
+            table_no: Номер таблицы (например 9)
+            stage: 'field' или 'office'
+            
+        Returns:
+            Словарь коэффициентов K1, K2, K3
+        """
+        coefficients = {}
+        
+        # ========================================
+        # K1 - Коэффициенты из примечаний к таблицам (из БД)
+        # ========================================
+        k1_value = Decimal('1.0')
+        k1_reasons = []
+        k1_sources = []
+        
+        try:
+            k1_coeffs = await self.db.get_k1_coefficients(table_no, params)
+            for coeff in k1_coeffs:
+                k1_value *= Decimal(str(coeff['value']))
+                k1_reasons.append(coeff['name'])
+                source_ref = coeff.get('source_ref', {})
+                if source_ref.get('section'):
+                    k1_sources.append(source_ref['section'])
+            
+            if not k1_coeffs:
+                k1_reasons.append('Базовый')
+                k1_sources.append(f'табл. {table_no}')
+                
+        except Exception as e:
+            logger.warning(f"Ошибка получения K1 из БД: {e}, используем fallback")
+            k1_value, k1_reasons, k1_sources = self._get_k1_fallback(params)
+        
+        coefficients['K1'] = {
+            'value': float(k1_value),
+            'reason': '; '.join(k1_reasons) if k1_reasons else 'Базовый',
+            'source': ', '.join(k1_sources) if k1_sources else f'табл. {table_no}'
+        }
+        
+        # ========================================
+        # K2 - Коэффициенты из п.15 ОУ (из БД)
+        # ========================================
+        k2_value = Decimal('1.0')
+        k2_reasons = []
+        k2_sources = []
+        
+        # Для камеральных работ добавляем коэффициенты из п.15 ОУ
+        if stage == 'office':
+            try:
+                k2_coeffs = await self.db.get_k2_coefficients(params)
+                for coeff in k2_coeffs:
+                    k2_value *= Decimal(str(coeff['value']))
+                    k2_reasons.append(coeff['name'])
+                    source_ref = coeff.get('source_ref', {})
+                    if source_ref.get('section'):
+                        k2_sources.append(source_ref['section'])
+                        
+            except Exception as e:
+                logger.warning(f"Ошибка получения K2 из БД: {e}, используем fallback")
+                k2_value, k2_reasons, k2_sources = self._get_k2_fallback(params, stage)
+        
+        if not k2_reasons:
+            k2_reasons.append('Базовый')
+        
+        coefficients['K2'] = {
+            'value': float(k2_value),
+            'reason': '; '.join(k2_reasons),
+            'source': ', '.join(k2_sources) if k2_sources else 'ОУ п.15'
+        }
+        
+        # ========================================
+        # K3 - Коэффициенты условий производства (п.8, п.14 ОУ)
+        # ПОКА = 1.0 (данные объекта не заданы)
+        # ========================================
+        coefficients['K3'] = {
+            'value': 1.0,
+            'reason': 'Условия объекта не заданы',
+            'source': 'ОУ п.8, п.14'
+        }
+        
+        return coefficients
+    
+    def _get_k1_fallback(self, params: Dict) -> tuple:
+        """
+        Fallback для K1 если БД недоступна
+        K1 - коэффициент территории + подземные коммуникации (прим. 4 к табл. 9)
+        """
+        territory = params.get('territory_type')
+        has_underground = params.get('has_underground_comms')
+        update_mode = params.get('update_mode', False)
+        
+        k1_value = Decimal('1.0')
+        k1_reasons = []
+        k1_sources = []
+        
+        # Прим. 4 к табл. 9 - съемка подземных коммуникаций
+        if has_underground:
+            if territory == 'промпредприятие':
+                k1_value = Decimal('1.75')
+                k1_reasons.append('Промпредприятие + подземные')
+                k1_sources.append('прим. 4')
+            elif territory == 'застроенная':
+                k1_value = Decimal('1.55')
+                k1_reasons.append('Застроенная + подземные')
+                k1_sources.append('прим. 4')
+            else:
+                k1_value = Decimal('1.20')
+                k1_reasons.append('Незастроенная + подземные')
+                k1_sources.append('прим. 4')
+        
+        # Обновление существующего плана (табл. 10)
+        if update_mode:
+            k1_value *= Decimal('0.50')
+            k1_reasons.append('Обновление')
+            k1_sources.append('табл. 10')
+        
+        if not k1_reasons:
+            k1_reasons.append('Базовый')
+            k1_sources.append('табл. 9')
+        
+        return k1_value, k1_reasons, k1_sources
+    
+    def _get_k2_fallback(self, params: Dict, stage: str) -> tuple:
+        """
+        Fallback для K2 если БД недоступна
+        K2 - коэффициент эскизов опор (прим. 5 к табл. 9) для полевых
+             + коэффициенты п.15 ОУ для камеральных
+        """
+        has_pole_sketches = params.get('has_pole_sketches', False)
+        use_computer = params.get('use_computer', True)
+        dual_format = params.get('dual_format', False)
+        color_plan = params.get('color_plan', False)
+        
+        k2_value = Decimal('1.0')
+        k2_reasons = []
+        k2_sources = []
+        
+        # Прим. 5 к табл. 9 - эскизы опор (применяется к полевым работам)
+        if stage == 'field':
+            if has_pole_sketches:
+                k2_value = Decimal('1.30')
+                k2_reasons.append('Эскизы опор')
+                k2_sources.append('прим. 5')
+        
+        # Коэффициенты п.15 ОУ (применяются к камеральным работам)
+        if stage == 'office':
+            # Прим. 5 к табл. 9 - эскизы опор (применяется и к камеральным)
+            if has_pole_sketches:
+                k2_value *= Decimal('1.30')
+                k2_reasons.append('Эскизы опор')
+                k2_sources.append('прим. 5')
+            
+            if use_computer and dual_format:
+                logger.warning("Конфликт: п.15д и п.15е нельзя применять одновременно!")
+                dual_format = False
+            
+            if use_computer:
+                k2_value *= Decimal('1.20')
+                k2_reasons.append('Компьютерные технологии')
+                k2_sources.append('ОУ п.15д')
+            
+            if dual_format:
+                k2_value *= Decimal('1.75')
+                k2_reasons.append('Два носителя')
+                k2_sources.append('ОУ п.15е')
+            
+            if color_plan:
+                k2_value *= Decimal('1.10')
+                k2_reasons.append('План в цвете')
+                k2_sources.append('ОУ п.15г')
+        
+        if not k2_reasons:
+            k2_reasons.append('Базовый')
+        
+        return k2_value, k2_reasons, k2_sources
+    
     def _get_coefficients(self, params: Dict, stage: str) -> Dict:
         """
-        Получает коэффициенты для этапа работ
+        Синхронная версия получения коэффициентов (fallback)
+        Используется когда нет доступа к БД
         
         Args:
             params: Параметры работ
             stage: 'field' или 'office'
             
         Returns:
-            Словарь коэффициентов
+            Словарь коэффициентов K1, K2, K3
         """
         coefficients = {}
         
-        territory = params.get('territory_type')
-        has_underground = params.get('has_underground_comms')
-        has_poles = params.get('has_pole_sketches')
-        use_computer = params.get('use_computer', True)
-        update_mode = params.get('update_mode')
+        # Обработка None для params
+        if params is None:
+            params = {}
         
-        # К1 - Территория промпредприятия (прим. 4 к т. 9)
-        if territory == 'промпредприятие':
-            coefficients['К1'] = {
-                'value': 1.75,
-                'reason': 'Территория промпредприятия (прим. 4)'
-            }
-        elif territory == 'застроенная':
-            # Базовый коэффициент для застроенной территории
-            coefficients['К1'] = {
-                'value': 1.0,
-                'reason': 'Застроенная территория'
-            }
-        # Для незастроенной территории К1 = 1.0 (не добавляем)
+        # K1 - из fallback
+        k1_value, k1_reasons, k1_sources = self._get_k1_fallback(params)
+        coefficients['K1'] = {
+            'value': float(k1_value),
+            'reason': '; '.join(k1_reasons),
+            'source': ', '.join(k1_sources)
+        }
         
-        # К2 - Съемка подземных коммуникаций (прим. 5 к т. 9)
-        if has_underground:
-            coefficients['К2'] = {
-                'value': 1.30,
-                'reason': 'Съемка подземных коммуникаций (прим. 5)'
-            }
+        # K2 - из fallback
+        k2_value, k2_reasons, k2_sources = self._get_k2_fallback(params, stage)
+        coefficients['K2'] = {
+            'value': float(k2_value),
+            'reason': '; '.join(k2_reasons),
+            'source': ', '.join(k2_sources) if k2_sources else 'ОУ п.15'
+        }
         
-        # К3 - Эскизы опор (прим. 5 к т. 9)
-        if has_poles:
-            coefficients['К3'] = {
-                'value': 1.0,
-                'reason': 'С эскизами опор (прим. 5)'
-            }
-        
-        # К4 - Компьютерные технологии (только для камеральных, ОУ 15г, 15д)
-        if stage == 'office' and use_computer:
-            coefficients['К4'] = {
-                'value': 1.20,
-                'reason': 'Компьютерные технологии (ОУ 15г, 15д)'
-            }
-        
-        # Кобн - Обновление существующего плана
-        if update_mode:
-            coefficients['Кобн'] = {
-                'value': 0.50,
-                'reason': 'Обновление существующего плана'
-            }
+        # K3 - пока всегда 1.0
+        coefficients['K3'] = {
+            'value': 1.0,
+            'reason': 'Условия объекта не заданы',
+            'source': 'ОУ п.8, п.14'
+        }
         
         return coefficients
     

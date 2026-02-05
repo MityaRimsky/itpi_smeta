@@ -47,7 +47,11 @@ SUPABASE_SERVICE_ROLE_KEY=your_key_here
 ### 3. Запустите бота
 
 ```bash
+# Из папки bot/
 python main.py
+
+# Или из корня проекта
+cd .. && python bot/main.py
 ```
 
 ## ⚠️ Важно: Только один экземпляр бота!
