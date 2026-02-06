@@ -155,23 +155,24 @@ class SmetaBot:
                 )
                 return
             
-            # 2. Ищем работы в БД
-            works = await self.db.search_works(
+            # 2. Ищем работы в БД (используем новый метод с детальными ошибками)
+            search_result = await self.db.search_works_v2(
                 query=params["work_type"],
                 scale=params.get("scale"),
                 category=params.get("category"),
                 territory=params.get("territory_type")
             )
             
-            if not works:
-                await update.message.reply_text(
-                    f"❌ Не найдено работ по запросу: {params['work_type']}\n"
-                    "Попробуйте изменить формулировку."
-                )
+            if not search_result.found:
+                # Показываем детальное сообщение об ошибке
+                error_msg = search_result.to_error_message()
+                await update.message.reply_text(error_msg, parse_mode="Markdown")
                 return
             
-            # 3. Выбираем лучшую работу
-            selected_work = await self.ai.select_best_work(user_message, works)
+            works = search_result.works
+            
+            # 3. Выбираем лучшую работу (передаем params для фильтрации по категории)
+            selected_work = await self.ai.select_best_work(user_message, works, params)
             
             if not selected_work:
                 await update.message.reply_text("❌ Не удалось выбрать подходящую работу.")
