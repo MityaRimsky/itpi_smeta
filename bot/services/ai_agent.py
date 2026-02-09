@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 from openai import AsyncOpenAI
 from loguru import logger
 import json
+import re
 
 
 class AIAgent:
@@ -200,6 +201,48 @@ class AIAgent:
             sanitized["has_detailed_wells_sketches"] = True
         if sanitized.get("no_center") is None and any(k in text for k in ["без закладки центра", "без закладки центров"]):
             sanitized["no_center"] = True
+
+        # Проверка полноты планов (табл. 75, прим. 3) — отдельная работа из БД
+        if "проверки полноты планов" in text:
+            sanitized["work_type"] = "проверка полноты планов"
+            sanitized["unit"] = "организация"
+            sanitized["work_stage"] = "камеральные"
+            m = re.search(r"(\\d+[\\.,]?\\d*)\\s*(служб|организац)", text)
+            if m:
+                try:
+                    sanitized["quantity"] = float(m.group(1).replace(",", "."))
+                except Exception:
+                    pass
+
+        # Продольные профили — единица измерения "дм профиля"
+        if "профил" in text and "дм" in text:
+            if not sanitized.get("work_type") or "профил" not in sanitized.get("work_type", ""):
+                sanitized["work_type"] = "продольных профилей трассы"
+            if not sanitized.get("unit") or sanitized.get("unit") in ["м", "км"]:
+                sanitized["unit"] = "дм профиля"
+            if "св.20 до 40" in text or "св. 20 до 40" in text or "св 20 до 40" in text:
+                sanitized["column"] = "св. 20 до 40"
+            elif "до 20" in text:
+                sanitized["column"] = "до 20"
+            elif "свыше 40" in text or "св. 40" in text:
+                sanitized["column"] = "свыше 40"
+            # Ищем количество дм профиля (берем последнее значение, отличное от "1 дм")
+            matches = []
+            for m in re.finditer(r"(\d+(?:[\.,]\d+)?)\s*дм", text):
+                matches.append(m.group(1))
+            for m in re.finditer(r"дм\s*(\d+(?:[\.,]\d+)?)", text):
+                matches.append(m.group(1))
+            if matches:
+                values = []
+                for raw in matches:
+                    try:
+                        values.append(float(raw.replace(",", ".")))
+                    except Exception:
+                        pass
+                if values:
+                    preferred = [v for v in values if v > 1.5]
+                    chosen = preferred[-1] if preferred else values[-1]
+                    sanitized["quantity"] = chosen
         for key, keywords in rules.items():
             if sanitized.get(key) is True and not has_any(keywords):
                 sanitized[key] = None
@@ -219,6 +262,10 @@ class AIAgent:
             Список недостающих параметров с вариантами ответов
         """
         missing = []
+
+        # Специальные работы без уточнений
+        if work_type and "проверка полноты планов" in work_type.lower():
+            return missing
         
         # Для топографической съемки нужны дополнительные параметры
         if any(kw in work_type.lower() for kw in ['топо', 'съемка', 'план']):
@@ -406,7 +453,7 @@ class AIAgent:
                 if len(matching_works) == 1:
                     return matching_works[0]
                 found_works = matching_works  # Продолжаем выбор среди отфильтрованных
-        
+
         # Формируем список для AI с параметрами
         works_list = []
         for i, w in enumerate(found_works):
@@ -509,14 +556,18 @@ class AIAgent:
         table_no = work.get('table_no')
         section = work.get('section')
         k1_notes = []
-        if calc.get('field_calculation', {}).get('coefficients', {}).get('K1', {}).get('notes'):
-            k1_notes = calc['field_calculation']['coefficients']['K1']['notes']
-        elif calc.get('office_calculation', {}).get('coefficients', {}).get('K1', {}).get('notes'):
-            k1_notes = calc['office_calculation']['coefficients']['K1']['notes']
+        field_calc = calc.get('field_calculation') or {}
+        office_calc = calc.get('office_calculation') or {}
+        if field_calc.get('coefficients', {}).get('K1', {}).get('notes'):
+            k1_notes = field_calc['coefficients']['K1']['notes']
+        elif office_calc.get('coefficients', {}).get('K1', {}).get('notes'):
+            k1_notes = office_calc['coefficients']['K1']['notes']
 
         if table_no and section:
             sec = str(section).strip()
-            if sec and not sec.lower().startswith('п.'):
+            if sec and sec.lower().startswith('прим'):
+                sec = sec
+            elif sec and not sec.lower().startswith('п.'):
                 sec = f"п. {sec}"
             justification = f"т. {table_no}, {sec}"
             if k1_notes:

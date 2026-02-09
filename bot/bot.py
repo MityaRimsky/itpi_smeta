@@ -150,7 +150,7 @@ class SmetaBot:
             
             # 1. Извлекаем параметры через AI
             params = await self.ai.extract_parameters(user_message)
-            
+
             if not params.get("work_type"):
                 await update.message.reply_text(
                     "❌ Не удалось понять запрос.\n"
@@ -165,7 +165,8 @@ class SmetaBot:
                 scale=params.get("scale"),
                 category=params.get("category"),
                 territory=params.get("territory_type"),
-                height_section=params.get("height_section")
+                height_section=params.get("height_section"),
+                column=params.get("column")
             )
             
             if not search_result.found:
@@ -328,6 +329,12 @@ class SmetaBot:
             # Определяем этап работ
             work_stage = params.get('work_stage', 'обе')
             
+            # Если работа хранит единую цену (price), подставляем ее в нужный этап
+            if work_stage in ['полевые', 'обе'] and not work.get('price_field') and work.get('price'):
+                work['price_field'] = work['price']
+            if work_stage in ['камеральные', 'обе'] and not work.get('price_office') and work.get('price'):
+                work['price_office'] = work['price']
+
             # Проверяем, есть ли нужные цены в выбранной работе
             # Если нет - ищем дополнительную работу с нужной ценой
             if work_stage in ['полевые', 'обе'] and not work.get('price_field'):
@@ -340,8 +347,8 @@ class SmetaBot:
                     territory=params.get('territory_type')
                 )
                 for w in works:
-                    if w.get('price_field'):
-                        work['price_field'] = w['price_field']
+                    if w.get('price_field') or w.get('price'):
+                        work['price_field'] = w.get('price_field') or w.get('price')
                         logger.info(f"Найдена полевая цена: {w['price_field']}")
                         break
             
@@ -355,8 +362,8 @@ class SmetaBot:
                     territory=params.get('territory_type')
                 )
                 for w in works:
-                    if w.get('price_office'):
-                        work['price_office'] = w['price_office']
+                    if w.get('price_office') or w.get('price'):
+                        work['price_office'] = w.get('price_office') or w.get('price')
                         logger.info(f"Найдена камеральная цена: {w['price_office']}")
                         break
             

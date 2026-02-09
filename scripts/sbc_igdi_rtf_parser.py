@@ -455,13 +455,13 @@ def build_items(table_no: int, block: str, table_title: Optional[str] = None) ->
                 if table_no == 9:
                     # Для табл.9: категория сложности в дескрипторе (римские цифры)
                     if "category" not in params:
-                        mcat = re.search(r"\\b([IVX]+)\\b", descriptor)
+                        mcat = re.search(r"\b([IVX]+)\b", descriptor)
                         if mcat:
                             params["category"] = mcat.group(1)
                     # Для табл.9: сечение рельефа — последнее число после масштаба
                     if "height_section" not in params and "scale" in params:
-                        desc_no_scale = re.sub(r"1:\\s?\\d+", " ", descriptor)
-                        nums = re.findall(r"\\d+[\\.,]?\\d*", desc_no_scale)
+                        desc_no_scale = re.sub(r"1:\s?\d+", " ", descriptor)
+                        nums = re.findall(r"\d+[\.,]?\d*", desc_no_scale)
                         if nums:
                             try:
                                 params["height_section"] = float(nums[-1].replace(",", "."))
@@ -568,8 +568,8 @@ def build_coeffs_and_addons(text: str) -> Tuple[List[NormCoeff], List[NormAddon]
         NormCoeff("INTERMEDIATE_MATERIALS_1_1", "Выдача промежуточных материалов", 1.10, "total", None, {"intermediate_materials": True}, {"section": "п.15а"}),
         NormCoeff("RESTRICTED_MATERIALS_1_1", "Камеральные с материалами ограниченного пользования", 1.10, "office", None, {"restricted_materials": True}, {"section": "п.15б"}),
         NormCoeff("FIELD_ARTIFICIAL_LIGHT_1_15", "Полевые с искусственным освещением", 1.15, "field", None, {"artificial_light": True}, {"section": "п.15в"}),
-        NormCoeff("COLOR_PLAN_1_1", "План в цвете (камер.)", 1.10, "office", "COLOR_OR_COMPUTER", {"color_plan": True}, {"section": "п.15г"}),
-        NormCoeff("COMPUTER_TECH_1_2", "Компьютерные технологии (камер.)", 1.20, "office", "COLOR_OR_COMPUTER", {"computer_tech": True}, {"section": "п.15д"}),
+        NormCoeff("COLOR_PLAN_1_1", "План в цвете (камер.)", 1.10, "office", None, {"color_plan": True}, {"section": "п.15г"}),
+        NormCoeff("COMPUTER_TECH_1_2", "Компьютерные технологии (камер.)", 1.20, "office", None, {"computer_tech": True}, {"section": "п.15д"}),
         NormCoeff("DUAL_MEDIA_1_75", "Два вида носителей (камер.)", 1.75, "office", "DUAL_MEDIA", {"dual_media": True}, {"section": "п.15е"}),
     ]
 
@@ -1313,6 +1313,21 @@ def main() -> None:
     items: List[NormItem] = []
     for no, block, title in iter_tables(text):
         items.extend(build_items(no, block, title))
+
+    # Прим. 3 к табл. 75: проверка полноты планов в эксплуатирующих организациях
+    items.append(
+        NormItem(
+            table_no=75,
+            section="прим. 3",
+            work_title="Проверка полноты планов в эксплуатирующих организациях",
+            unit="организация",
+            price=480.0,
+            price_field=None,
+            price_office=480.0,
+            params={"descriptor": "Проверка полноты планов"},
+            source_ref={"table": 75, "note": 3},
+        )
+    )
 
     coeffs, addons = build_coeffs_and_addons(text)
     desert, unfavorable, zones = parse_appendices(text)

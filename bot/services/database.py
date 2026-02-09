@@ -121,12 +121,12 @@ class DatabaseService:
         if value is None:
             return None
         text = str(value).lower().strip()
+        if "незастро" in text:
+            return "незастроенная"
         if "пром" in text:
             return "промпредприятие"
         if "застро" in text:
             return "застроенная"
-        if "незастро" in text:
-            return "незастроенная"
         return text
 
     @staticmethod
@@ -194,6 +194,7 @@ class DatabaseService:
         category: Optional[str] = None,
         territory: Optional[str] = None,
         height_section: Optional[float] = None,
+        column: Optional[str] = None,
         limit: int = 10
     ) -> SearchResult:
         """
@@ -226,7 +227,7 @@ class DatabaseService:
         for term in search_terms:
             try:
                 response = self.client.table("norm_items").select(
-                    "id, work_title, unit, price_field, price_office, table_no, section, params"
+                    "id, work_title, unit, price, price_field, price_office, table_no, section, params"
                 ).ilike("work_title", f"%{term}%").limit(limit * 2).execute()
                 
                 for item in response.data:
@@ -252,6 +253,16 @@ class DatabaseService:
         # 4. Фильтруем по параметрам
         filtered_works = []
         filter_errors = []
+
+        req_scale = self._normalize_scale(scale) if scale else None
+        req_category = str(category).upper() if category else None
+        req_territory = self._normalize_territory(territory) if territory else None
+        req_height = None
+        if height_section is not None:
+            try:
+                req_height = float(height_section)
+            except Exception:
+                req_height = None
         
         for work in all_works:
             params = work.get('params', {})
@@ -262,54 +273,63 @@ class DatabaseService:
             if query and any(k in query.lower() for k in ['топограф', 'инженерно-топограф', 'топоплан']):
                 if table_no is not None and int(table_no) != 9:
                     continue
-            
-            # Проверяем масштаб
-            if scale:
-                work_scale = params.get('scale', '')
-                if scale not in work_title and work_scale != scale:
+
+            # Продольные профили трассы — таблица 74
+            if query and ("продольн" in query.lower() and "профил" in query.lower()):
+                if table_no is not None and int(table_no) != 74:
+                    continue
+
+            # Проверка полноты планов — прим. 3 к табл. 75
+            if query and "проверки полноты планов" in query.lower():
+                if table_no is not None and int(table_no) != 75:
                     continue
             
+            # Проверяем масштаб
+            if req_scale:
+                # Для табл.74 масштаб в условии не используется (берем по числу ординат)
+                if table_no is not None and int(table_no) == 74:
+                    pass
+                else:
+                    work_scale = self._normalize_scale(params.get('scale', ''))
+                    if not work_scale:
+                        # fallback: извлекаем масштаб из заголовка
+                        m = re.search(r"1:\s?\d+", work_title)
+                        if m:
+                            work_scale = self._normalize_scale(m.group(0))
+                    if work_scale and work_scale != req_scale:
+                        continue
+            
             # Проверяем категорию сложности
-            if category:
+            if req_category:
                 work_category = params.get('category', '')
                 # Если у работы есть категория - она должна совпадать
                 if work_category:
-                    if work_category != category:
+                    if str(work_category).upper() != req_category:
                         continue
                 # Если у работы нет категории - она подходит для любой категории
             
             # Проверяем территорию
-            if territory:
-                work_territory = params.get('territory', '')
-                territory_lower = territory.lower()
-                if work_territory and work_territory.lower() != territory_lower:
-                    # Проверяем в названии
-                    if territory_lower not in work_title:
-                        continue
+            if req_territory:
+                work_territory = self._normalize_territory(params.get('territory', ''))
+                if work_territory and work_territory != req_territory:
+                    continue
+
+            # Проверяем колонку (например, "св. 20 до 40")
+            if column:
+                work_column = params.get('column', '')
+                if work_column and work_column != column:
+                    continue
 
             # Проверяем сечение рельефа (высоту сечения)
-            if height_section is not None:
-                try:
-                    hs = float(height_section)
-                except Exception:
-                    hs = None
-                if hs is not None:
-                    work_hs = params.get('height_section')
-                    if work_hs is None:
-                        # Пытаемся извлечь из названия
-                        m = re.search(r"(\\d+[\\.,]?\\d*)", work_title)
-                        if m:
-                            try:
-                                work_hs = float(m.group(1).replace(',', '.'))
-                            except Exception:
-                                work_hs = None
-                    if work_hs is not None:
-                        try:
-                            work_hs_val = float(str(work_hs).replace(',', '.'))
-                            if abs(work_hs_val - hs) > 1e-6:
-                                continue
-                        except Exception:
-                            pass
+            if req_height is not None:
+                work_hs = params.get('height_section')
+                if work_hs is not None:
+                    try:
+                        work_hs_val = float(str(work_hs).replace(',', '.'))
+                        if abs(work_hs_val - req_height) > 1e-6:
+                            continue
+                    except Exception:
+                        pass
             
             filtered_works.append(work)
         
@@ -347,6 +367,15 @@ class DatabaseService:
                 result.suggestions.append("Доступные: застроенная, незастроенная, промпредприятие")
             
             return result
+
+        # 4.5. Предпочитаем базовые строки с обеими ценами (полевые+камер.)
+        def _has_both_prices(item: Dict) -> bool:
+            return item.get("price_field") is not None and item.get("price_office") is not None
+
+        if filtered_works:
+            with_both = [w for w in filtered_works if _has_both_prices(w)]
+            if with_both:
+                filtered_works = with_both
         
         # 5. Преобразуем в нужный формат
         for item in filtered_works[:limit]:
@@ -356,7 +385,7 @@ class DatabaseService:
                 'work_title': item['work_title'],
                 'code': item.get('section', ''),
                 'unit': item.get('unit', ''),
-                'price': item.get('price_field', 0),
+                'price': item.get('price'),
                 'price_field': item.get('price_field', 0),
                 'price_office': item.get('price_office', 0),
                 'table_no': item.get('table_no'),
@@ -495,7 +524,7 @@ class DatabaseService:
         for search_term in search_variants:
             try:
                 query_builder = self.client.table("norm_items").select(
-                    "id, work_title, unit, price_field, price_office, table_no, section, params"
+                    "id, work_title, unit, price, price_field, price_office, table_no, section, params"
                 )
                 
                 # Поиск по названию работы
