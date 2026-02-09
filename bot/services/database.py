@@ -1178,8 +1178,8 @@ class DatabaseService:
                             })
                             break
             
-            # 3. Организация и ликвидация (п.13)
-            if params.get('include_org_liq'):
+            # 3. Организация и ликвидация (п.13) — стандартно при наличии полевых работ
+            if field_cost > 0:
                 response = self.client.table("norm_addons").select("*").eq(
                     "code", "ORG_LIQ_6PCT"
                 ).execute()
@@ -1224,20 +1224,18 @@ class DatabaseService:
                         'source_ref': addon.get('source_ref', {})
                     })
             
-            # 4. Удорожания (как отдельные строки)
-            if apply_conditions_as_addons:
+            # 4. Дополнительные надбавки (не стандартные) применяются только если явно запрошены
+            if params.get('apply_conditions_as_addons'):
                 # Сезонное удорожание
                 unfavorable_months = params.get('unfavorable_months')
                 if unfavorable_months:
                     response = self.client.table("norm_addons").select("*").like(
                         "code", "SEASONAL_ADDON_%"
                     ).execute()
-                    
                     for addon in response.data:
                         conditions = addon.get('conditions', {})
                         months_min = conditions.get('unfavorable_months_min', 0)
                         months_max = conditions.get('unfavorable_months_max', 12)
-                        
                         if months_min <= unfavorable_months <= months_max:
                             addon_amount = field_cost * addon['value']
                             addons.append({
@@ -1250,26 +1248,22 @@ class DatabaseService:
                                 'source_ref': addon.get('source_ref', {})
                             })
                             break
-                
+
                 # Региональное удорожание
                 salary_coeff = params.get('salary_coeff')
                 if salary_coeff and salary_coeff > 1.0:
                     response = self.client.table("norm_addons").select("*").like(
                         "code", "REGIONAL_ADDON_%"
                     ).execute()
-                    
                     best_match = None
                     best_diff = float('inf')
-                    
                     for addon in response.data:
                         conditions = addon.get('conditions', {})
                         addon_salary = conditions.get('salary_coeff', 1.0)
                         diff = abs(addon_salary - salary_coeff)
-                        
                         if diff < best_diff:
                             best_diff = diff
                             best_match = addon
-                    
                     if best_match:
                         subtotal = field_cost + params.get('office_cost', 0) + sum(a['amount'] for a in addons)
                         addon_amount = subtotal * best_match['value']
@@ -1282,19 +1276,17 @@ class DatabaseService:
                             'amount': round(addon_amount, 2),
                             'source_ref': best_match.get('source_ref', {})
                         })
-                
+
                 # Горное удорожание
                 altitude = params.get('altitude')
                 if altitude and altitude >= 1500:
                     response = self.client.table("norm_addons").select("*").like(
                         "code", "MOUNTAIN_ADDON_%"
                     ).execute()
-                    
                     for addon in response.data:
                         conditions = addon.get('conditions', {})
                         alt_min = conditions.get('altitude_min', 0)
                         alt_max = conditions.get('altitude_max', 999999)
-                        
                         if alt_min <= altitude < alt_max:
                             addon_amount = field_cost * addon['value']
                             addons.append({
@@ -1307,13 +1299,12 @@ class DatabaseService:
                                 'source_ref': addon.get('source_ref', {})
                             })
                             break
-                
+
                 # Спецрежим удорожание
                 if params.get('special_regime'):
                     response = self.client.table("norm_addons").select("*").eq(
                         "code", "SPECIAL_REGIME_ADDON"
                     ).execute()
-                    
                     if response.data:
                         addon = response.data[0]
                         addon_amount = field_cost * addon['value']
@@ -1326,13 +1317,12 @@ class DatabaseService:
                             'amount': round(addon_amount, 2),
                             'source_ref': addon.get('source_ref', {})
                         })
-                
+
                 # Промежуточные материалы
                 if params.get('intermediate_materials'):
                     response = self.client.table("norm_addons").select("*").eq(
                         "code", "INTERMEDIATE_MATERIALS_ADDON"
                     ).execute()
-                    
                     if response.data:
                         addon = response.data[0]
                         total_work_cost = field_cost + params.get('office_cost', 0)
@@ -1347,35 +1337,46 @@ class DatabaseService:
                             'source_ref': addon.get('source_ref', {})
                         })
 
-            # 5. Формульные надбавки (табл.78-80)
-            response = self.client.table("norm_addons").select("*").like(
-                "code", "PROGRAM_T78_%"
-            ).execute()
-            response2 = self.client.table("norm_addons").select("*").like(
-                "code", "REPORT_T79_%"
-            ).execute()
-            response3 = self.client.table("norm_addons").select("*").like(
-                "code", "REGISTRATION_T80_%"
-            ).execute()
-            piecewise = (response.data or []) + (response2.data or []) + (response3.data or [])
-            for addon in piecewise:
-                conditions = addon.get('conditions', {})
-                min_th = conditions.get('base_cost_thousand_min')
-                max_th = conditions.get('base_cost_thousand_max')
-                if not self._match_range(base_cost_thousand, min_th, max_th):
-                    continue
-                fixed = conditions.get('fixed_amount')
-                percent_over = conditions.get('percent_over')
-                amount = self._piecewise_amount(base_cost_thousand, fixed, percent_over, min_th)
-                addons.append({
-                    'code': addon['code'],
-                    'name': addon['name'],
-                    'calc_type': addon['calc_type'],
-                    'rate': addon['value'],
-                    'base': base_cost_thousand * 1000.0,
-                    'amount': round(amount, 2),
-                    'source_ref': addon.get('source_ref', {})
-                })
+            # 5. Формульные надбавки (табл.78-80) — только по явному запросу
+            include_program = params.get('include_program') or False
+            include_report = params.get('include_report') or False
+            include_registration = params.get('include_registration') or False
+            if include_program or include_report or include_registration:
+                response = self.client.table("norm_addons").select("*").like(
+                    "code", "PROGRAM_T78_%"
+                ).execute()
+                response2 = self.client.table("norm_addons").select("*").like(
+                    "code", "REPORT_T79_%"
+                ).execute()
+                response3 = self.client.table("norm_addons").select("*").like(
+                    "code", "REGISTRATION_T80_%"
+                ).execute()
+                piecewise = (response.data or []) + (response2.data or []) + (response3.data or [])
+                for addon in piecewise:
+                    code = addon.get('code', '')
+                    if code.startswith('PROGRAM_') and not include_program:
+                        continue
+                    if code.startswith('REPORT_') and not include_report:
+                        continue
+                    if code.startswith('REGISTRATION_') and not include_registration:
+                        continue
+                    conditions = addon.get('conditions', {})
+                    min_th = conditions.get('base_cost_thousand_min')
+                    max_th = conditions.get('base_cost_thousand_max')
+                    if not self._match_range(base_cost_thousand, min_th, max_th):
+                        continue
+                    fixed = conditions.get('fixed_amount')
+                    percent_over = conditions.get('percent_over')
+                    amount = self._piecewise_amount(base_cost_thousand, fixed, percent_over, min_th)
+                    addons.append({
+                        'code': addon['code'],
+                        'name': addon['name'],
+                        'calc_type': addon['calc_type'],
+                        'rate': addon['value'],
+                        'base': base_cost_thousand * 1000.0,
+                        'amount': round(amount, 2),
+                        'source_ref': addon.get('source_ref', {})
+                    })
             
             logger.info(f"Найдено надбавок по условиям: {len(addons)}")
             return addons

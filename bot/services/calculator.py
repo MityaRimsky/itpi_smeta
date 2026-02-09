@@ -178,7 +178,26 @@ class CostCalculator:
             # Надбавки из БД (применяются к сумме полевых + камеральных)
             params_with_office = {**merged_params, 'office_cost': float(office_total)}
             params_with_office['base_cost_thousand'] = (float(field_total + office_total) / 1000.0)
-            addons = await self._calculate_addons_from_db(params_with_office, float(field_total))
+            # 1) Считаем надбавки один раз, чтобы получить внутренний транспорт
+            addons = await self._calculate_addons_from_db(
+                params_with_office,
+                float(field_total),
+                internal_transport_cost=0.0,
+            )
+
+            # 2) Если есть внутренний транспорт, пересчитываем надбавки,
+            #    чтобы внешний транспорт и орг/ликв считались от (полевые + внутренний)
+            internal_transport_cost = 0.0
+            for a in addons:
+                if a.get('code', '').startswith('INTERNAL_T4_'):
+                    internal_transport_cost += float(a.get('amount') or 0.0)
+
+            if internal_transport_cost > 0:
+                addons = await self._calculate_addons_from_db(
+                    params_with_office,
+                    float(field_total),
+                    internal_transport_cost=internal_transport_cost,
+                )
             result['addons_applied'] = addons
             
             total_addons = sum(Decimal(str(a['amount'])) for a in addons)
@@ -408,7 +427,12 @@ class CostCalculator:
         
         return coefficients, total_coeffs, errors
     
-    async def _calculate_addons_from_db(self, params: Dict, field_cost: float) -> List[Dict]:
+    async def _calculate_addons_from_db(
+        self,
+        params: Dict,
+        field_cost: float,
+        internal_transport_cost: float = 0.0
+    ) -> List[Dict]:
         """
         Рассчитывает надбавки из БД
         
@@ -421,7 +445,11 @@ class CostCalculator:
         """
         try:
             # Получаем надбавки из БД по условиям
-            addons = await self.db.get_addons_by_conditions(params, field_cost)
+            addons = await self.db.get_addons_by_conditions(
+                params,
+                field_cost,
+                internal_transport_cost=internal_transport_cost
+            )
             
             if not addons:
                 logger.warning("Надбавки не найдены в БД, проверьте параметры")
