@@ -58,24 +58,27 @@ class AIAgent:
 - quantity: объем работ (число) или null
 - unit: единица измерения (га, км, пункт, м) или null
 - scale: масштаб (1:500, 1:1000, 1:2000) или null
+- height_section: сечение рельефа (например 0.5, 1.0, 2.0) или null
 - work_stage: этап работ ("полевые", "камеральные", "обе") или null
 
 === ПАРАМЕТРЫ ДЛЯ K1 (примечания к таблицам) ===
 - territory_type: тип территории - "застроенная", "незастроенная", "промпредприятие" или null
 - has_underground_comms: съемка подземных коммуникаций (true/false/null)
 - has_detailed_wells_sketches: детальные эскизы колодцев и опор (true/false/null)
+- measurement_drawings: обмерные чертежи зданий и сооружений (true/false/null)
+- special_object: крупные ж/д станции/аэропорты и др. спецобъекты (string/null)
 - update_mode: обновление существующего плана (true/false/null)
 - category: категория СЛОЖНОСТИ работ (I, II, III, IV) или null
   * ВАЖНО: НЕ ПУТАТЬ с категорией дороги!
   * "II кат.сложности", "2 категория сложности", "II категория" (в скобках) → category: "II"
   * "III-IV категории дороги" → это road_category, НЕ category!
-- use_satellite: применение спутниковых систем/GPS/GNSS (true/false/null) - K2=1.3 ТОЛЬКО для ПЛАНОВЫХ опорных сетей!
+- use_satellite: применение спутниковых систем/GPS/GNSS (true/false/null) - K1=1.3 ТОЛЬКО для ПЛАНОВЫХ опорных сетей!
   * ВАЖНО: для ВЫСОТНЫХ сетей (нивелирование, IV класс) use_satellite = false!
   * "плановая опорная сеть спутниковым методом" → use_satellite: true
   * "высотная опорная сеть IV класс" → use_satellite: false (это нивелирование!)
 
 === ПАРАМЕТРЫ ДЛЯ K2 (п.15 ОУ) ===
-- use_computer: компьютерные технологии для камеральных (true по умолчанию)
+- use_computer: компьютерные технологии для камеральных (true/false/null)
 - dual_format: два носителя - магнитный + бумажный (true/false/null)
 - color_plan: план в цвете (true/false/null)
 - intermediate_materials: выдача промежуточных материалов (true/false/null)
@@ -95,18 +98,24 @@ class AIAgent:
 - distance_to_base: расстояние от базы до объекта в км (для внутреннего транспорта) или null
 - external_distance: расстояние внешнего транспорта в км или null
 - expedition_duration: длительность экспедиции в месяцах или null
+- include_org_liq: включать организацию/ликвидацию полевых работ (true/false/null)
+- apply_conditions_as_addons: применять сезонность/районность/горные как отдельные надбавки (true/false/null)
 
 ВАЖНО: 
 1. Для work_type используй СТАНДАРТНЫЕ термины!
 2. "инженерно-топографический план" = "топографическая съемка"
 3. Если параметр явно не указан - верни null
-4. Для use_computer по умолчанию true (современные работы)
+4. Если параметр явно не указан - верни null (без автоматических true)
+5. Не придумывай параметры, которых нет в тексте.
+6. Для слов «эстакад», «колодцев», «подробное обследование» — has_detailed_wells_sketches=true.
 5. ВНИМАТЕЛЬНО извлекай quantity! "пункт 15" = quantity: 15, "15 пунктов" = quantity: 15
 6. "км 2,00" = quantity: 2.0, unit: "км"
 
 Примеры:
 - "топоплан 92 га промпредприятие" → quantity: 92, unit: "га", territory_type: "промпредприятие"
+- "сечение рельефа 2,0" → height_section: 2.0
 - "съемка с подземными коммуникациями" → has_underground_comms: true
+- "детальное обследование эстакад/колодцев" → has_detailed_wells_sketches: true
 - "работы в Магадане" → region_type: "far_north" (Магадан - Крайний Север)
 - "горный район 2500м" → altitude: 2500
 - "неблагоприятный период 6 месяцев" → unfavorable_months: 6
@@ -134,6 +143,7 @@ class AIAgent:
             
             # Если AI вернул вложенные словари - разворачиваем в плоский
             flat_result = self._flatten_params(result)
+            flat_result = self._sanitize_params(user_message, flat_result)
             
             logger.info(f"Извлечены параметры: {flat_result}")
             return flat_result
@@ -155,6 +165,46 @@ class AIAgent:
                 flat[key] = value
         
         return flat
+
+    def _sanitize_params(self, user_message: str, params: Dict) -> Dict:
+        """Обнуляет булевы флаги, если в тексте нет явных триггеров."""
+        text = user_message.lower()
+
+        def has_any(keywords: List[str]) -> bool:
+            return any(k in text for k in keywords)
+
+        rules = {
+            "use_computer": ["компьютер", "компьютерн", "cad", "гис", "gis", "цифров"],
+            "dual_format": ["два носителя", "двух видах", "магнитн", "бумажн", "цифровой и бумажный"],
+            "color_plan": ["в цвете", "цветной", "цвета", "цвет"],
+            "intermediate_materials": ["промежуточ"],
+            "classified_materials": ["ограниченного", "секрет", "дсп", "служебн"],
+            "artificial_lighting": ["искусственн", "освещ"],
+            "special_regime": ["погран", "полигон", "аэродром", "спецрежим", "режим"],
+            "night_time": ["ноч", "ночное", "ночью"],
+            "no_field_allowance": ["без полевого", "без командировочных", "без полевого довольствия"],
+            "office_in_field_camp": ["экспедицион", "в экспедиционных условиях"],
+            "use_satellite": ["спутник", "gps", "gnss", "глонасс"],
+            "no_center": ["без закладки центра", "без закладки центров"],
+        }
+
+        sanitized = dict(params)
+        if "height_section" in sanitized and sanitized["height_section"] is not None:
+            try:
+                sanitized["height_section"] = float(str(sanitized["height_section"]).replace(",", "."))
+            except Exception:
+                pass
+        if not sanitized.get("work_stage"):
+            sanitized["work_stage"] = "обе"
+        if sanitized.get("has_detailed_wells_sketches") is None and any(k in text for k in ["эстакад", "колодц"]):
+            sanitized["has_detailed_wells_sketches"] = True
+        if sanitized.get("no_center") is None and any(k in text for k in ["без закладки центра", "без закладки центров"]):
+            sanitized["no_center"] = True
+        for key, keywords in rules.items():
+            if sanitized.get(key) is True and not has_any(keywords):
+                sanitized[key] = None
+
+        return sanitized
     
     def get_missing_parameters(self, params: Dict, work_type: str) -> List[Dict]:
         """
@@ -229,56 +279,7 @@ class AIAgent:
                     'affects': 'Расчет'
                 })
             
-            # === K3 ПАРАМЕТРЫ (условия производства) ===
-            
-            # Районный коэффициент
-            if params.get('salary_coeff') is None and params.get('region_type') is None:
-                missing.append({
-                    'param': 'salary_coeff',
-                    'question': '🌍 Укажите районный коэффициент к зарплате (или регион):',
-                    'options': [
-                        ('1', 'Нет районного коэффициента (центральная Россия)', None),
-                        ('2', '1.15 (Урал, часть Сибири)', 1.15),
-                        ('3', '1.20 (Западная Сибирь)', 1.20),
-                        ('4', '1.30-1.40 (Восточная Сибирь)', 1.30),
-                        ('5', '1.50-1.70 (Крайний Север)', 1.50),
-                        ('6', '1.80-2.00 (Чукотка, Магадан)', 1.80)
-                    ],
-                    'required': False,
-                    'affects': 'K3 (табл. 3, п.8д)'
-                })
-            
-            # Неблагоприятный период
-            if params.get('unfavorable_months') is None:
-                missing.append({
-                    'param': 'unfavorable_months',
-                    'question': '❄️ Работы в неблагоприятный период года?',
-                    'options': [
-                        ('1', 'Нет, благоприятный период', None),
-                        ('2', '4-5.5 месяцев неблагоприятного периода (+20%)', 5),
-                        ('3', '6-7.5 месяцев неблагоприятного периода (+30%)', 7),
-                        ('4', '8-9.5 месяцев неблагоприятного периода (+40%)', 9)
-                    ],
-                    'required': False,
-                    'affects': 'K3 (табл. 2, п.8г)'
-                })
-            
-            # === ПАРАМЕТРЫ ДЛЯ НАДБАВОК ===
-            
-            # Расстояние до базы (для внутреннего транспорта)
-            if params.get('distance_to_base') is None:
-                missing.append({
-                    'param': 'distance_to_base',
-                    'question': '🚗 Расстояние от базы до объекта:',
-                    'options': [
-                        ('1', 'До 5 км', 5),
-                        ('2', '5-10 км', 10),
-                        ('3', '10-15 км', 15),
-                        ('4', '15-20 км', 20)
-                    ],
-                    'required': False,
-                    'affects': 'Внутренний транспорт (табл. 4, п.9)'
-                })
+            # K3 и надбавки пользователь задаёт отдельно — не спрашиваем автоматически.
         
         return missing
     
@@ -474,6 +475,7 @@ class AIAgent:
         """Простое форматирование без AI"""
         work = calc.get('work', {})
         params = work.get('params', {})
+        calc_params = calc.get('params', {})
         
         text = f"""📊 *Расчет стоимости работ*
 
@@ -481,8 +483,9 @@ class AIAgent:
 """
         
         # Выводим параметры работы (категория сложности, категория дороги и т.д.)
-        if params.get('category'):
-            text += f"*Категория сложности:* {params['category']}\n"
+        category = params.get('category') or calc_params.get('category')
+        if category:
+            text += f"*Категория сложности:* {category}\n"
         if params.get('road_category'):
             text += f"*Категория дороги:* {params['road_category']}\n"
         if params.get('voltage'):
@@ -492,8 +495,37 @@ class AIAgent:
         if params.get('distance'):
             text += f"*Расстояние:* {params['distance']}\n"
         
-        text += f"""*Объем:* {calc['quantity']} {work.get('unit', calc.get('unit', ''))}
-*Обоснование:* {work.get('table_ref', calc.get('justification', ''))}
+        quantity = calc.get('quantity', 0)
+        try:
+            quantity_val = int(quantity) if float(quantity).is_integer() else quantity
+        except Exception:
+            quantity_val = quantity
+
+        unit_raw = work.get('unit', calc.get('unit', '')) or ''
+        unit = unit_raw.strip()
+        if unit.lower().startswith('1 '):
+            unit = unit[2:].strip()
+
+        table_no = work.get('table_no')
+        section = work.get('section')
+        k1_notes = []
+        if calc.get('field_calculation', {}).get('coefficients', {}).get('K1', {}).get('notes'):
+            k1_notes = calc['field_calculation']['coefficients']['K1']['notes']
+        elif calc.get('office_calculation', {}).get('coefficients', {}).get('K1', {}).get('notes'):
+            k1_notes = calc['office_calculation']['coefficients']['K1']['notes']
+
+        if table_no and section:
+            sec = str(section).strip()
+            if sec and not sec.lower().startswith('п.'):
+                sec = f"п. {sec}"
+            justification = f"т. {table_no}, {sec}"
+            if k1_notes:
+                justification += ", " + ", ".join([f"прим. {n}" for n in k1_notes])
+        else:
+            justification = work.get('table_ref', calc.get('justification', ''))
+
+        text += f"""*Объем:* {quantity_val} {unit}
+*Обоснование:* {justification}
 
 """
         
@@ -505,9 +537,15 @@ class AIAgent:
 • Базовая стоимость: {fc['base_cost']:,.2f} руб
 """
             if fc.get('coefficients'):
+                def _fmt_coeff_value(value):
+                    try:
+                        return f"{float(value):.2f}"
+                    except (TypeError, ValueError):
+                        return str(value)
+
                 text += "• Коэффициенты:\n"
                 for code, info in fc['coefficients'].items():
-                    text += f"  - {code}: {info['value']} ({info['reason']})\n"
+                    text += f"  - {code}: {_fmt_coeff_value(info.get('value'))} ({info['reason']})\n"
             text += f"• *Итого полевые: {fc['total']:,.2f} руб*\n\n"
         
         # Камеральные работы
@@ -518,9 +556,15 @@ class AIAgent:
 • Базовая стоимость: {oc['base_cost']:,.2f} руб
 """
             if oc.get('coefficients'):
+                def _fmt_coeff_value(value):
+                    try:
+                        return f"{float(value):.2f}"
+                    except (TypeError, ValueError):
+                        return str(value)
+
                 text += "• Коэффициенты:\n"
                 for code, info in oc['coefficients'].items():
-                    text += f"  - {code}: {info['value']} ({info['reason']})\n"
+                    text += f"  - {code}: {_fmt_coeff_value(info.get('value'))} ({info['reason']})\n"
             text += f"• *Итого камеральные: {oc['total']:,.2f} руб*\n\n"
         
         # Надбавки (отдельными строками)

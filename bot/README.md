@@ -51,7 +51,7 @@ SUPABASE_SERVICE_ROLE_KEY=your_key_here
 python main.py
 
 # Или из корня проекта
-cd .. && python bot/main.py
+cd /Users/addvibe/projects/itpi_smeta/bot && python main.py
 ```
 
 ## ⚠️ Важно: Только один экземпляр бота!

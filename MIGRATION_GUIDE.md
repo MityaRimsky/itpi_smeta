@@ -8,6 +8,9 @@
 
 1. **001_create_smeta_tables.sql** - Создание всех 11 таблиц с индексами и триггерами
 2. **002_seed_initial_data.sql** - Загрузка начальных данных из СБЦ ИГДИ 2004
+3. **017_sbc_igdi_2004_full_items.sql** - Полная загрузка расценок из RTF (табл. 8–84)
+4. **018_sbc_igdi_2004_coeffs_and_rules.sql** - Коэффициенты и надбавки (ОУ, табл. 1–6, 10, 78–80, примечания табл. 9)
+5. **019_sbc_igdi_2004_appendices.sql** - Приложения 1–5 (региональные списки/коэффициенты/периоды)
 
 ## Способы применения миграций
 
@@ -27,6 +30,24 @@ const migration002 = fs.readFileSync('migrations/002_seed_initial_data.sql', 'ut
 await use_mcp_tool("chx1du0mcp0", "itpi_execute_migration", {
   sql: migration002
 });
+
+// Применение миграции 017
+const migration017 = fs.readFileSync('migrations/017_sbc_igdi_2004_full_items.sql', 'utf8');
+await use_mcp_tool("chx1du0mcp0", "itpi_execute_migration", {
+  sql: migration017
+});
+
+// Применение миграции 018
+const migration018 = fs.readFileSync('migrations/018_sbc_igdi_2004_coeffs_and_rules.sql', 'utf8');
+await use_mcp_tool("chx1du0mcp0", "itpi_execute_migration", {
+  sql: migration018
+});
+
+// Применение миграции 019
+const migration019 = fs.readFileSync('migrations/019_sbc_igdi_2004_appendices.sql', 'utf8');
+await use_mcp_tool("chx1du0mcp0", "itpi_execute_migration", {
+  sql: migration019
+});
 ```
 
 ### Способ 2: Через psql
@@ -40,6 +61,9 @@ source .env.supabase
 # Примените миграции
 psql "$DATABASE_URL" -f migrations/001_create_smeta_tables.sql
 psql "$DATABASE_URL" -f migrations/002_seed_initial_data.sql
+psql "$DATABASE_URL" -f migrations/017_sbc_igdi_2004_full_items.sql
+psql "$DATABASE_URL" -f migrations/018_sbc_igdi_2004_coeffs_and_rules.sql
+psql "$DATABASE_URL" -f migrations/019_sbc_igdi_2004_appendices.sql
 ```
 
 ### Способ 3: Через Supabase Dashboard
@@ -67,14 +91,18 @@ SELECT
   (SELECT COUNT(*) FROM norm_coeffs) as coeffs,
   (SELECT COUNT(*) FROM norm_addons) as addons,
   (SELECT COUNT(*) FROM inflation_indices) as indices,
-  (SELECT COUNT(*) FROM regional_coeffs) as regions;
+  (SELECT COUNT(*) FROM regional_coeffs) as regions,
+  (SELECT COUNT(*) FROM regional_desert_coeffs) as desert_coeffs,
+  (SELECT COUNT(*) FROM regional_unfavorable_periods) as unfavorable_periods,
+  (SELECT COUNT(*) FROM regional_zone_lists) as zone_lists;
 ```
 
 Ожидаемый результат:
 ```
 docs | items | coeffs | addons | indices | regions
 -----|-------|--------|--------|---------|--------
-  1  |   6   |   4    |   5    |    3    |    5
+ 1  |   6   |   4    |   5    |    3    |    5
+После применения миграций 017–019 количества будут значительно больше (полный набор табл. 8–84 и приложения).
 ```
 
 ## Откат миграций

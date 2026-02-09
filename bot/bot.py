@@ -138,8 +138,12 @@ class SmetaBot:
         try:
             # Проверяем, ожидаем ли ответ на уточняющий вопрос
             if user_id in self.user_context and self.user_context[user_id].get('waiting_for'):
-                await self._handle_clarification_response(update, user_message)
-                return
+                # Если пользователь прислал новый запрос вместо ответа — сбрасываем ожидание
+                if self._looks_like_new_request(user_message):
+                    self.user_context.pop(user_id, None)
+                else:
+                    await self._handle_clarification_response(update, user_message)
+                    return
             
             # Показываем, что бот работает
             await update.message.reply_text("⏳ Анализирую запрос...")
@@ -160,7 +164,8 @@ class SmetaBot:
                 query=params["work_type"],
                 scale=params.get("scale"),
                 category=params.get("category"),
-                territory=params.get("territory_type")
+                territory=params.get("territory_type"),
+                height_section=params.get("height_section")
             )
             
             if not search_result.found:
@@ -202,6 +207,29 @@ class SmetaBot:
                 "❌ Произошла ошибка при обработке запроса.\n"
                 "Попробуйте еще раз или обратитесь к администратору."
             )
+
+    @staticmethod
+    def _looks_like_new_request(message: str) -> bool:
+        """Грубая эвристика: отличает новый расчет от короткого ответа (1/2/да/нет)."""
+        if not message:
+            return False
+        text = message.strip().lower()
+        # Короткие ответы считаем уточнением
+        if len(text) <= 4:
+            return False
+        if text in {"да", "нет", "обе", "полевые", "камеральные"}:
+            return False
+        keywords = [
+            "план", "съемк", "съёмк", "сеть", "пункт", "пункта", "пунктов",
+            "га", "км", "масштаб", "класс", "разряд", "категор", "опорн",
+            "профил", "трасс", "протяж", "колодц", "коммуникац",
+        ]
+        if any(k in text for k in keywords):
+            return True
+        # Наличие чисел и единиц часто означает новый запрос
+        if any(u in text for u in [" га", "км", "пункт", "м-ба", "1:"]):
+            return True
+        return False
     
     async def _ask_clarification(self, message, user_id: int, param_info: dict):
         """Задает уточняющий вопрос с inline-кнопками"""

@@ -61,27 +61,59 @@ class CostCalculator:
             if params is None:
                 params = {}
             
+            # Обогащаем параметры данными по регионам
+            # Нормализуем строковые "None" и числовые строки
+            for key in [
+                "altitude",
+                "altitude_m",
+                "unfavorable_months",
+                "salary_coeff",
+                "distance_to_base",
+                "distance_to_base_km",
+                "external_distance",
+                "external_distance_km",
+                "expedition_duration",
+                "expedition_duration_months",
+                "height_section",
+            ]:
+                if key in params and isinstance(params[key], str):
+                    if params[key].strip().lower() == "none":
+                        params[key] = None
+                    else:
+                        try:
+                            params[key] = float(params[key].replace(",", "."))
+                        except Exception:
+                            pass
+
+            params = await self.db.enrich_params_with_region(params)
+            
             logger.info(f"calculate_full: work={work.get('work_title')}, quantity={quantity}, work_stage={work_stage}")
             logger.info(f"calculate_full: params={params}")
             
             qty = Decimal(str(quantity))
-            table_no = work.get('table_no', 9)
+            table_no = work.get('table_no')
+            merged_params = {**(work.get('params') or {}), **params}
+            if work.get("section") is not None and "section" not in merged_params:
+                merged_params["section"] = work.get("section")
             
             result = {
                 'work': {
                     'id': work.get('id'),
                     'work_title': work.get('work_title'),
                     'unit': work.get('unit'),
+                    'table_no': table_no,
+                    'section': work.get('section'),
                     'table_ref': f"т. {table_no}, {work.get('section', '')}" if table_no else work.get('section', ''),
                     'price_field': float(work.get('price_field') or 0),
                     'price_office': float(work.get('price_office') or 0),
                     'params': work.get('params', {})  # Параметры работы (категория сложности и т.д.)
                 },
                 'quantity': float(qty),
-                'params': params,
+                'params': merged_params,
                 'field_calculation': None,
                 'office_calculation': None,
                 'addons_applied': [],
+                'total_coefficients': [],
                 'total_cost': 0,
                 'justification': '',
                 'errors': [],
@@ -89,6 +121,7 @@ class CostCalculator:
             }
             
             total = Decimal(0)
+            total_coeffs = []
             justification_parts = []
             
             if table_no:
@@ -102,13 +135,15 @@ class CostCalculator:
                 field_calc = await self._calculate_stage(
                     work=work,
                     quantity=qty,
-                    params=params,
+                    params=merged_params,
                     stage='field',
                     table_no=table_no
                 )
                 result['field_calculation'] = field_calc
                 field_total = Decimal(str(field_calc['total']))
                 total += field_total
+                if field_calc.get('total_coeffs'):
+                    total_coeffs = field_calc['total_coeffs']
                 
                 if field_calc.get('coefficients'):
                     coeff_str = ', '.join([f"{k}={v['value']}" for k, v in field_calc['coefficients'].items()])
@@ -123,13 +158,15 @@ class CostCalculator:
                 office_calc = await self._calculate_stage(
                     work=work,
                     quantity=qty,
-                    params=params,
+                    params=merged_params,
                     stage='office',
                     table_no=table_no
                 )
                 result['office_calculation'] = office_calc
                 office_total = Decimal(str(office_calc['total']))
                 total += office_total
+                if office_calc.get('total_coeffs'):
+                    total_coeffs = office_calc['total_coeffs']
                 
                 if office_calc.get('coefficients'):
                     coeff_str = ', '.join([f"{k}={v['value']}" for k, v in office_calc['coefficients'].items()])
@@ -139,12 +176,22 @@ class CostCalculator:
                     result['errors'].extend(office_calc['errors'])
             
             # Надбавки из БД (применяются к сумме полевых + камеральных)
-            params_with_office = {**params, 'office_cost': float(office_total)}
+            params_with_office = {**merged_params, 'office_cost': float(office_total)}
+            params_with_office['base_cost_thousand'] = (float(field_total + office_total) / 1000.0)
             addons = await self._calculate_addons_from_db(params_with_office, float(field_total))
             result['addons_applied'] = addons
             
             total_addons = sum(Decimal(str(a['amount'])) for a in addons)
             total += total_addons
+            
+            # Применяем коэффициенты apply_to=total после надбавок
+            if total_coeffs:
+                for coeff in total_coeffs:
+                    total *= Decimal(str(coeff['value']))
+                result['total_coefficients'] = total_coeffs
+                coeff_names = ', '.join([c['code'] for c in total_coeffs if c.get('code')])
+                if coeff_names:
+                    justification_parts.append(f"Итоговые коэффициенты: {coeff_names}")
             
             if addons:
                 addon_names = ', '.join([a['code'] for a in addons])
@@ -191,7 +238,7 @@ class CostCalculator:
         base_cost = base_price * quantity
         
         # Получаем коэффициенты ТОЛЬКО из БД
-        coefficients, errors = await self._get_coefficients_from_db(params, table_no, stage)
+        coefficients, total_coeffs, errors = await self._get_coefficients_from_db(params, table_no, stage)
         
         # Применяем коэффициенты
         total = base_cost
@@ -204,7 +251,8 @@ class CostCalculator:
             'base_cost': float(base_cost.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
             'coefficients': coefficients,
             'total': float(total.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
-            'errors': errors
+            'errors': errors,
+            'total_coeffs': total_coeffs
         }
     
     async def _get_coefficients_from_db(self, params: Dict, table_no: int, stage: str) -> tuple:
@@ -218,10 +266,11 @@ class CostCalculator:
             stage: 'field' или 'office'
             
         Returns:
-            Tuple[словарь коэффициентов, список ошибок]
+            Tuple[словарь коэффициентов этапа, список итоговых коэффициентов, список ошибок]
         """
         coefficients = {}
         errors = []
+        total_coeffs = []
         
         # ========================================
         # K1 - Коэффициенты из примечаний к таблицам (из БД)
@@ -229,9 +278,10 @@ class CostCalculator:
         k1_value = Decimal('1.0')
         k1_reasons = []
         k1_sources = []
+        k1_notes = []
         
         try:
-            k1_coeffs = await self.db.get_k1_coefficients(table_no, params)
+            k1_coeffs = await self.db.get_k1_coefficients(table_no, params, stage=stage)
             
             # Фильтруем по exclusive_group
             k1_coeffs = self.db._filter_by_exclusive_group(k1_coeffs, params)
@@ -242,6 +292,8 @@ class CostCalculator:
                 source_ref = coeff.get('source_ref', {})
                 if source_ref.get('section'):
                     k1_sources.append(source_ref['section'])
+                if source_ref.get('note') is not None:
+                    k1_notes.append(str(source_ref.get('note')))
             
             if not k1_coeffs:
                 k1_reasons.append('Базовый (условия не заданы)')
@@ -257,7 +309,8 @@ class CostCalculator:
         coefficients['K1'] = {
             'value': float(k1_value),
             'reason': '; '.join(k1_reasons) if k1_reasons else 'Базовый',
-            'source': ', '.join(k1_sources) if k1_sources else f'табл. {table_no}'
+            'source': ', '.join(k1_sources) if k1_sources else f'табл. {table_no}',
+            'notes': sorted(set(k1_notes))
         }
         
         # ========================================
@@ -267,39 +320,20 @@ class CostCalculator:
         k2_reasons = []
         k2_sources = []
         
-        # K2 коэффициенты:
-        # - Для опорных сетей (таблица 8): K2=1.3 применяется к ПОЛЕВЫМ при use_satellite
-        # - Для остальных работ: K2 применяется к КАМЕРАЛЬНЫМ (компьютерные технологии и т.д.)
-        
-        should_apply_k2 = False
-        
-        if table_no == 8:
-            # Опорные сети: K2=1.3 для полевых при спутниковых системах
-            if stage == 'field' and params.get('use_satellite'):
-                should_apply_k2 = True
-            # Камеральные опорных сетей: K2 = 1.0 (не применяется)
-        else:
-            # Остальные работы: K2 для камеральных
-            if stage == 'office':
-                should_apply_k2 = True
+        # K2 применяется только к камеральным работам (п.15 ОУ),
+        # и только если параметры явно заданы пользователем.
+        should_apply_k2 = stage == 'office'
         
         if should_apply_k2:
             try:
-                if table_no == 8 and stage == 'field':
-                    # Для опорных сетей - только коэффициент спутниковых систем
-                    k2_value = Decimal('1.3')
-                    k2_reasons.append('Применение спутниковых систем')
-                    k2_sources.append('прим. 2 к табл. 8')
-                else:
-                    # Для остальных - стандартные K2 коэффициенты
-                    k2_coeffs = await self.db.get_k2_coefficients(params)
-                    
-                    for coeff in k2_coeffs:
-                        k2_value *= Decimal(str(coeff['value']))
-                        k2_reasons.append(coeff['name'])
-                        source_ref = coeff.get('source_ref', {})
-                        if source_ref.get('section'):
-                            k2_sources.append(source_ref['section'])
+                k2_coeffs = await self.db.get_k2_coefficients(params)
+                
+                for coeff in k2_coeffs:
+                    k2_value *= Decimal(str(coeff['value']))
+                    k2_reasons.append(coeff['name'])
+                    source_ref = coeff.get('source_ref', {})
+                    if source_ref.get('section'):
+                        k2_sources.append(source_ref['section'])
                         
             except ValueError as ve:
                 # Конфликт коэффициентов
@@ -333,16 +367,24 @@ class CostCalculator:
             k3_coeffs = await self.db.get_k3_coefficients(params)
             
             for coeff in k3_coeffs:
-                # K3 применяется к полевым работам (кроме районных)
                 apply_to = coeff.get('apply_to', 'field')
+                if apply_to == 'total':
+                    total_coeffs.append({
+                        'code': coeff.get('code'),
+                        'name': coeff.get('name'),
+                        'value': coeff.get('value'),
+                        'apply_to': 'total',
+                        'source_ref': coeff.get('source_ref', {})
+                    })
+                    continue
                 
-                if stage == 'field' and apply_to in ['field', 'total']:
+                if stage == 'field' and apply_to == 'field':
                     k3_value *= Decimal(str(coeff['value']))
                     k3_reasons.append(coeff['name'])
                     source_ref = coeff.get('source_ref', {})
                     if source_ref.get('section'):
                         k3_sources.append(source_ref['section'])
-                elif stage == 'office' and apply_to in ['office', 'total']:
+                elif stage == 'office' and apply_to == 'office':
                     k3_value *= Decimal(str(coeff['value']))
                     k3_reasons.append(coeff['name'])
                     source_ref = coeff.get('source_ref', {})
@@ -364,7 +406,7 @@ class CostCalculator:
             'source': ', '.join(k3_sources) if k3_sources else 'ОУ п.8, п.14'
         }
         
-        return coefficients, errors
+        return coefficients, total_coeffs, errors
     
     async def _calculate_addons_from_db(self, params: Dict, field_cost: float) -> List[Dict]:
         """
