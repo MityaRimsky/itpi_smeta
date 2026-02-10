@@ -11,3 +11,10 @@ services:
       - ./logs:/app/logs
     environment:
       - TZ=Europe/Moscow
+    dns:
+      - ${DNS_PRIMARY:-1.1.1.1}
+      - ${DNS_SECONDARY:-8.8.8.8}
+    dns_opt:
+      - timeout:1
+      - attempts:2
+      - rotate
