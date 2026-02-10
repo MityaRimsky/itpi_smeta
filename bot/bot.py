@@ -11,6 +11,7 @@ from config import settings
 from services.database import DatabaseService
 from services.calculator import CostCalculator
 from services.ai_agent import AIAgent
+import time
 
 
 class SmetaBot:
@@ -24,6 +25,8 @@ class SmetaBot:
         
         # Хранилище контекста пользователей (для уточняющих вопросов)
         self.user_context = {}
+        # Кэш авторизации: (user_id, username_lower) -> (allowed, expires_at)
+        self.auth_cache = {}
         
         # Создаем приложение
         self.app = Application.builder().token(settings.telegram_bot_token).build()
@@ -36,20 +39,37 @@ class SmetaBot:
         
         logger.info("Бот инициализирован")
     
-    def check_auth(self, user_id: int) -> bool:
-        """Проверка авторизации пользователя"""
-        return user_id in settings.allowed_ids
+    async def check_auth(self, user_id: int, username: str | None) -> bool:
+        """Проверка авторизации пользователя (по таблице telegram_users)"""
+        key = (user_id, (username or "").lower())
+        now = time.time()
+        cached = self.auth_cache.get(key)
+        if cached and cached[1] > now:
+            return cached[0]
+        allowed = self.db.has_telegram_user(user_id, username)
+        self.auth_cache[key] = (allowed, now + 300)
+        return allowed
+
+    async def _ensure_auth(self, update: Update) -> bool:
+        user = update.effective_user
+        if not await self.check_auth(user.id, user.username):
+            if update.message:
+                await update.message.reply_text(
+                    "❌ У вас нет доступа к этому сервису.\n"
+                    "Обратитесь к администратору."
+                )
+            elif update.callback_query:
+                await update.callback_query.answer()
+                await update.callback_query.edit_message_text(
+                    "❌ У вас нет доступа к этому сервису.\n"
+                    "Обратитесь к администратору."
+                )
+            return False
+        return True
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
-        user_id = update.effective_user.id
-        
-        if not self.check_auth(user_id):
-            await update.message.reply_text(
-                "❌ У вас нет доступа к боту.\n"
-                f"Ваш ID: {user_id}\n"
-                "Обратитесь к администратору."
-            )
+        if not await self._ensure_auth(update):
             return
         
         await update.message.reply_text(
@@ -65,6 +85,8 @@ class SmetaBot:
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /help"""
+        if not await self._ensure_auth(update):
+            return
         await update.message.reply_text(
             "📖 *Справка по использованию бота*\n\n"
             "*Как пользоваться:*\n"
@@ -92,6 +114,9 @@ class SmetaBot:
         
         user_id = update.effective_user.id
         data = query.data
+
+        if not await self._ensure_auth(update):
+            return
         
         if user_id not in self.user_context:
             await query.edit_message_text("❌ Сессия истекла. Начните новый запрос.")
@@ -126,11 +151,9 @@ class SmetaBot:
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик текстовых сообщений"""
-        user_id = update.effective_user.id
-        
-        if not self.check_auth(user_id):
-            await update.message.reply_text("❌ У вас нет доступа к боту.")
+        if not await self._ensure_auth(update):
             return
+        user_id = update.effective_user.id
         
         user_message = update.message.text
         logger.info(f"Получено сообщение от {user_id}: {user_message}")

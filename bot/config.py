@@ -12,7 +12,6 @@ class Settings(BaseSettings):
     
     # Telegram Bot
     telegram_bot_token: str
-    allowed_telegram_ids: str  # "123,456,789"
     
     # OpenRouter AI
     openrouter_api_key: str
@@ -29,11 +28,6 @@ class Settings(BaseSettings):
     
     # Webhook (для деплоя)
     webhook_url: str = ""
-    
-    @property
-    def allowed_ids(self) -> List[int]:
-        """Преобразует строку ID в список целых чисел"""
-        return [int(id.strip()) for id in self.allowed_telegram_ids.split(",") if id.strip()]
     
     class Config:
         env_file = ".env"

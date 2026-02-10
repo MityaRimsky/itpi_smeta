@@ -60,6 +60,25 @@ class DatabaseService:
         self.client: Client = create_client(url, key)
         logger.info(f"Подключение к Supabase: {url}")
 
+    def has_telegram_user(self, telegram_id: int, username: Optional[str]) -> bool:
+        """
+        Проверяет наличие пользователя в таблице telegram_users по ID или username.
+        """
+        try:
+            if username:
+                uname = username.lstrip("@")
+                # Ищем по username без учета регистра или по ID
+                query = self.client.table("telegram_users").select("id").or_(
+                    f"telegram_id.eq.{telegram_id},username.ilike.{uname}"
+                )
+            else:
+                query = self.client.table("telegram_users").select("id").eq("telegram_id", telegram_id)
+            response = query.limit(1).execute()
+            return bool(response.data)
+        except Exception as e:
+            logger.error(f"Ошибка проверки пользователя telegram_users: {e}")
+            return False
+
     @staticmethod
     def _to_float(value: Any) -> Optional[float]:
         if value is None:

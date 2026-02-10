@@ -33,7 +33,7 @@ nano .env
 ```env
 # Telegram Bot (получите у @BotFather)
 TELEGRAM_BOT_TOKEN=your_bot_token_here
-ALLOWED_TELEGRAM_IDS=123456789,987654321
+# Доступ теперь через таблицу telegram_users
 
 # OpenRouter AI (зарегистрируйтесь на openrouter.ai)
 OPENROUTER_API_KEY=your_openrouter_key_here
