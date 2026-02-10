@@ -6,6 +6,7 @@ Telegram бот для расчета смет
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.error import TimedOut, NetworkError, InvalidToken
+from telegram.request import HTTPXRequest
 from loguru import logger
 import httpx
 
@@ -35,6 +36,24 @@ class SmetaBot:
 
     def _build_app(self) -> Application:
         """Создает и настраивает приложение Telegram."""
+        # Отдельный клиент для long-polling: без keep-alive, чтобы избежать
+        # периодических RemoteProtocolError на нестабильных сетях/прокси.
+        get_updates_request = HTTPXRequest(
+            connection_pool_size=1,
+            connect_timeout=30.0,
+            read_timeout=35.0,
+            write_timeout=30.0,
+            pool_timeout=30.0,
+            http_version="1.1",
+            httpx_kwargs={
+                "limits": httpx.Limits(
+                    max_connections=5,
+                    max_keepalive_connections=0,
+                    keepalive_expiry=0.0,
+                )
+            },
+        )
+
         app = (
             Application.builder()
             .token(settings.telegram_bot_token)
@@ -42,6 +61,7 @@ class SmetaBot:
             .read_timeout(30.0)
             .write_timeout(30.0)
             .pool_timeout(30.0)
+            .get_updates_request(get_updates_request)
             .build()
         )
 
