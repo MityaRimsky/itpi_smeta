@@ -436,10 +436,6 @@ class SmetaBot:
                 self.app.run_polling(
                     timeout=30,
                     bootstrap_retries=5,
-                    read_timeout=30,
-                    write_timeout=30,
-                    connect_timeout=30,
-                    pool_timeout=30,
                     drop_pending_updates=False,
                 )
                 # Штатная остановка (например, Ctrl+C)
