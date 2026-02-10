@@ -4,10 +4,12 @@ AI-агент для обработки запросов пользовател�
 """
 
 from typing import Dict, List, Optional, Tuple
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, RateLimitError
 from loguru import logger
+import asyncio
 import json
 import re
+import httpx
 
 
 class AIAgent:
@@ -23,10 +25,46 @@ class AIAgent:
         """
         self.client = AsyncOpenAI(
             api_key=api_key,
-            base_url="https://openrouter.ai/api/v1"
+            base_url="https://openrouter.ai/api/v1",
+            timeout=45.0,
+            max_retries=1,
         )
         self.model = model
         logger.info(f"AI-агент инициализирован: {model}")
+
+    async def _chat_json(self, prompt: str, op_name: str) -> Dict:
+        """Устойчивый вызов OpenRouter с ретраями на сетевые/временные сбои."""
+        last_error = None
+        retry_delays = [1, 2, 4]
+
+        for attempt, delay in enumerate(retry_delays, start=1):
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"},
+                    timeout=45.0,
+                )
+                return json.loads(response.choices[0].message.content)
+            except (
+                APITimeoutError,
+                APIConnectionError,
+                RateLimitError,
+                httpx.TimeoutException,
+                httpx.NetworkError,
+                TimeoutError,
+            ) as e:
+                last_error = e
+                logger.warning(
+                    f"{op_name}: временный сбой AI ({attempt}/{len(retry_delays)}): {e}. "
+                    f"Повтор через {delay} сек."
+                )
+                await asyncio.sleep(delay)
+            except Exception as e:
+                last_error = e
+                break
+
+        raise last_error if last_error else RuntimeError(f"{op_name}: неизвестная ошибка AI")
     
     async def extract_parameters(self, user_message: str) -> Dict:
         """
@@ -134,13 +172,7 @@ class AIAgent:
 - "ЛЭП 110 кВ, II категория" → category: "II" (категория сложности)"""
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"}
-            )
-            
-            result = json.loads(response.choices[0].message.content)
+            result = await self._chat_json(prompt, "extract_parameters")
             
             # Если AI вернул вложенные словари - разворачиваем в плоский
             flat_result = self._flatten_params(result)
@@ -535,13 +567,7 @@ class AIAgent:
 Верни JSON с полем "index" (номер выбранной работы, начиная с 1)."""
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"}
-            )
-            
-            result = json.loads(response.choices[0].message.content)
+            result = await self._chat_json(prompt, "select_best_work")
             index = result.get("index", 1) - 1
             
             if 0 <= index < len(found_works):

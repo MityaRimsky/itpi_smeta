@@ -5,11 +5,12 @@ pydantic>=2.5.0
 pydantic-settings>=2.1.0
 
 # Telegram Bot
-python-telegram-bot>=20.7
+python-telegram-bot==22.6
 
 # AI & HTTP
 openai>=1.10.0
 aiohttp>=3.9.0
+httpx==0.28.1
 
 # Database
 supabase>=2.3.0

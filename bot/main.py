@@ -4,6 +4,7 @@
 
 import sys
 import os
+import logging
 from loguru import logger
 
 # Добавляем текущую директорию в путь
@@ -29,6 +30,10 @@ logger.add(
     level="DEBUG"
 )
 
+# Снижаем шум сетевых библиотек, оставляя наши прикладные логи.
+for noisy_logger in ("httpx", "httpcore", "telegram.ext._utils.networkloop"):
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
 
 def main():
     """Главная функция"""
@@ -36,11 +41,11 @@ def main():
         logger.info("=" * 50)
         logger.info("Запуск Telegram бота для расчета смет")
         logger.info("=" * 50)
-        
+
         # Создаем и запускаем бота
         bot = SmetaBot()
         bot.run()
-        
+
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем")
     except Exception as e:

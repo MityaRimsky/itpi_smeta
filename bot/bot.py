@@ -6,7 +6,6 @@ Telegram бот для расчета смет
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.error import TimedOut, NetworkError, InvalidToken
-from telegram.request import HTTPXRequest
 from loguru import logger
 import httpx
 
@@ -36,32 +35,20 @@ class SmetaBot:
 
     def _build_app(self) -> Application:
         """Создает и настраивает приложение Telegram."""
-        # Отдельный клиент для long-polling: без keep-alive, чтобы избежать
-        # периодических RemoteProtocolError на нестабильных сетях/прокси.
-        get_updates_request = HTTPXRequest(
-            connection_pool_size=1,
-            connect_timeout=30.0,
-            read_timeout=35.0,
-            write_timeout=30.0,
-            pool_timeout=30.0,
-            http_version="1.1",
-            httpx_kwargs={
-                "limits": httpx.Limits(
-                    max_connections=5,
-                    max_keepalive_connections=0,
-                    keepalive_expiry=0.0,
-                )
-            },
-        )
-
         app = (
             Application.builder()
             .token(settings.telegram_bot_token)
+            .http_version("1.1")
             .connect_timeout(30.0)
             .read_timeout(30.0)
             .write_timeout(30.0)
             .pool_timeout(30.0)
-            .get_updates_request(get_updates_request)
+            .get_updates_http_version("1.1")
+            .get_updates_connection_pool_size(1)
+            .get_updates_connect_timeout(30.0)
+            .get_updates_read_timeout(45.0)
+            .get_updates_write_timeout(30.0)
+            .get_updates_pool_timeout(30.0)
             .build()
         )
 
@@ -69,7 +56,16 @@ class SmetaBot:
         app.add_handler(CommandHandler("help", self.help_command))
         app.add_handler(CallbackQueryHandler(self.handle_callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+        app.add_error_handler(self._handle_ptb_error)
         return app
+
+    async def _handle_ptb_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Глобальный обработчик ошибок PTB для контроля шумных сетевых логов."""
+        err = context.error
+        if isinstance(err, (NetworkError, TimedOut)):
+            logger.warning(f"Сетевой сбой Telegram API: {err}")
+            return
+        logger.exception(f"Необработанная ошибка PTB: {err}")
     
     async def check_auth(self, user_id: int, username: str | None) -> bool:
         """Проверка авторизации пользователя (по таблице telegram_users)"""
@@ -448,25 +444,16 @@ class SmetaBot:
     def run(self):
         """Запуск бота"""
         logger.info("Запуск бота...")
-        retry_delay = 5
-
-        while True:
-            try:
-                self.app = self._build_app()
-                self.app.run_polling(
-                    timeout=30,
-                    bootstrap_retries=5,
-                    drop_pending_updates=False,
-                )
-                # Штатная остановка (например, Ctrl+C)
-                break
-            except InvalidToken:
-                logger.error("Неверный TELEGRAM_BOT_TOKEN. Остановлено.")
-                raise
-            except (TimedOut, NetworkError, httpx.TimeoutException, httpx.NetworkError, OSError) as e:
-                logger.warning(
-                    f"Сетевой сбой при подключении к Telegram: {e}. "
-                    f"Повторная попытка через {retry_delay} сек."
-                )
-                time.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 60)
+        self.app = self._build_app()
+        try:
+            self.app.run_polling(
+                timeout=30,
+                bootstrap_retries=-1,
+                drop_pending_updates=False,
+            )
+        except InvalidToken:
+            logger.error("Неверный TELEGRAM_BOT_TOKEN. Остановлено.")
+            raise
+        except (TimedOut, NetworkError, httpx.TimeoutException, httpx.NetworkError, OSError) as e:
+            logger.error(f"Сетевой сбой Telegram API: {e}")
+            raise
