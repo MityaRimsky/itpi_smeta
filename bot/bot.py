@@ -5,7 +5,9 @@ Telegram бот для расчета смет
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.error import TimedOut, NetworkError, InvalidToken
 from loguru import logger
+import httpx
 
 from config import settings
 from services.database import DatabaseService
@@ -28,16 +30,26 @@ class SmetaBot:
         # Кэш авторизации: (user_id, username_lower) -> (allowed, expires_at)
         self.auth_cache = {}
         
-        # Создаем приложение
-        self.app = Application.builder().token(settings.telegram_bot_token).build()
-        
-        # Регистрируем обработчики
-        self.app.add_handler(CommandHandler("start", self.start_command))
-        self.app.add_handler(CommandHandler("help", self.help_command))
-        self.app.add_handler(CallbackQueryHandler(self.handle_callback))
-        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-        
+        self.app = None
         logger.info("Бот инициализирован")
+
+    def _build_app(self) -> Application:
+        """Создает и настраивает приложение Telegram."""
+        app = (
+            Application.builder()
+            .token(settings.telegram_bot_token)
+            .connect_timeout(30.0)
+            .read_timeout(30.0)
+            .write_timeout(30.0)
+            .pool_timeout(30.0)
+            .build()
+        )
+
+        app.add_handler(CommandHandler("start", self.start_command))
+        app.add_handler(CommandHandler("help", self.help_command))
+        app.add_handler(CallbackQueryHandler(self.handle_callback))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+        return app
     
     async def check_auth(self, user_id: int, username: str | None) -> bool:
         """Проверка авторизации пользователя (по таблице telegram_users)"""
@@ -416,4 +428,29 @@ class SmetaBot:
     def run(self):
         """Запуск бота"""
         logger.info("Запуск бота...")
-        self.app.run_polling()
+        retry_delay = 5
+
+        while True:
+            try:
+                self.app = self._build_app()
+                self.app.run_polling(
+                    timeout=30,
+                    bootstrap_retries=5,
+                    read_timeout=30,
+                    write_timeout=30,
+                    connect_timeout=30,
+                    pool_timeout=30,
+                    drop_pending_updates=False,
+                )
+                # Штатная остановка (например, Ctrl+C)
+                break
+            except InvalidToken:
+                logger.error("Неверный TELEGRAM_BOT_TOKEN. Остановлено.")
+                raise
+            except (TimedOut, NetworkError, httpx.TimeoutException, httpx.NetworkError, OSError) as e:
+                logger.warning(
+                    f"Сетевой сбой при подключении к Telegram: {e}. "
+                    f"Повторная попытка через {retry_delay} сек."
+                )
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)
